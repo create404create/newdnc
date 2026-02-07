@@ -1,79 +1,106 @@
 <?php
-// proxy.php - Simple PHP proxy to handle API requests and avoid CORS issues
-
 header('Content-Type: application/json');
 header('Access-Control-Allow-Origin: *');
-header('Access-Control-Allow-Methods: GET, POST');
+header('Access-Control-Allow-Methods: GET, POST, OPTIONS');
+header('Access-Control-Allow-Headers: Content-Type');
 
-// Get the endpoint and phone number from the request
+// Handle preflight requests
+if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
+    exit(0);
+}
+
+// Get parameters
 $endpoint = isset($_GET['endpoint']) ? $_GET['endpoint'] : '';
 $phone = isset($_GET['phone']) ? $_GET['phone'] : '';
 
-// Validate phone number (10 digits)
-if (!preg_match('/^\d{10}$/', $phone)) {
+// Validate phone number for DNC and details endpoints
+if (in_array($endpoint, ['tcpa', 'details']) && !preg_match('/^\d{10}$/', $phone)) {
     http_response_code(400);
-    echo json_encode(['error' => 'Invalid phone number format']);
+    echo json_encode(['error' => 'Invalid phone number format', 'phone' => $phone]);
     exit;
 }
 
-// API endpoints
-$apiUrls = [
-    'tcpa' => "https://api.uspeoplesearch.site/tcpa/v1?x={$phone}",
-    'details' => "https://api.uspeoplesearch.site/v1/?x={$phone}",
-    'status' => "https://api.uspeoplesearch.site/tcpa/v1?x=4045093823" // Test endpoint
+// API endpoints configuration
+$apiConfig = [
+    'tcpa' => [
+        'url' => 'https://api.uspeoplesearch.site/tcpa/v1?x=',
+        'test_phone' => '4045093823'
+    ],
+    'details' => [
+        'url' => 'https://api.uspeoplesearch.site/v1/?x=',
+        'test_phone' => '4045094083'
+    ]
 ];
 
-// Check if endpoint is valid
-if (!isset($apiUrls[$endpoint]) && $endpoint !== 'status') {
-    http_response_code(400);
-    echo json_encode(['error' => 'Invalid endpoint']);
+// For status check, use test endpoint
+if ($endpoint === 'status') {
+    $testUrl = $apiConfig['tcpa']['url'] . $apiConfig['tcpa']['test_phone'];
+    
+    $ch = curl_init($testUrl);
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 10);
+    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+    curl_setopt($ch, CURLOPT_HTTPHEADER, [
+        'User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Accept: application/json'
+    ]);
+    
+    $response = curl_exec($ch);
+    $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
+    
+    if ($httpCode === 200 && strpos($response, '"status":"ok"') !== false) {
+        echo json_encode(['status' => 'online', 'message' => 'API is working']);
+    } else {
+        echo json_encode(['status' => 'offline', 'message' => 'API is not responding']);
+    }
     exit;
 }
 
-// For status check, use the test endpoint
-$url = ($endpoint === 'status') ? $apiUrls['tcpa'] : $apiUrls[$endpoint];
-
-// Initialize cURL
-$ch = curl_init();
-curl_setopt($ch, CURLOPT_URL, $url);
-curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
-curl_setopt($ch, CURLOPT_TIMEOUT, 30);
-curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false); // For testing only, remove in production
-
-// Set headers to mimic a real browser request
-curl_setopt($ch, CURLOPT_HTTPHEADER, [
-    'User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-    'Accept: application/json',
-    'Accept-Language: en-US,en;q=0.9',
-]);
-
-// Execute request
-$response = curl_exec($ch);
-$httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-
-if (curl_errno($ch)) {
-    // If there's a cURL error
-    http_response_code(500);
-    echo json_encode([
-        'error' => 'API request failed',
-        'message' => curl_error($ch)
-    ]);
-} else {
-    // Pass through the HTTP status code and response
-    http_response_code($httpCode);
+// Handle DNC and details endpoints
+if (isset($apiConfig[$endpoint])) {
+    $apiUrl = $apiConfig[$endpoint]['url'] . $phone;
     
-    // For status endpoint, return a simplified response
-    if ($endpoint === 'status') {
-        if ($httpCode === 200) {
-            echo json_encode(['status' => 'online']);
-        } else {
-            echo json_encode(['status' => 'offline']);
-        }
+    $ch = curl_init($apiUrl);
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 30);
+    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+    curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
+    curl_setopt($ch, CURLOPT_HTTPHEADER, [
+        'User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+        'Accept: application/json',
+        'Accept-Language: en-US,en;q=0.9',
+        'Referer: https://uspeoplesearch.site/'
+    ]);
+    
+    $response = curl_exec($ch);
+    $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    $curlError = curl_error($ch);
+    curl_close($ch);
+    
+    // Log the request for debugging
+    error_log("DNC Checker API Call: $endpoint - Phone: $phone - Status: $httpCode");
+    
+    if ($curlError) {
+        http_response_code(500);
+        echo json_encode([
+            'error' => 'CURL Error',
+            'message' => $curlError,
+            'phone' => $phone
+        ]);
+    } elseif ($httpCode !== 200) {
+        http_response_code($httpCode);
+        echo json_encode([
+            'error' => 'API Error',
+            'http_code' => $httpCode,
+            'phone' => $phone
+        ]);
     } else {
+        // Pass through the API response
         echo $response;
     }
+} else {
+    http_response_code(400);
+    echo json_encode(['error' => 'Invalid endpoint', 'endpoint' => $endpoint]);
 }
-
-curl_close($ch);
 ?>
